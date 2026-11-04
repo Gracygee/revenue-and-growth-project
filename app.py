@@ -5,6 +5,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+
 # --- Page Config: Wide layout for dashboard ---
 st.set_page_config(layout="wide", page_title="Group 4 - Revenue & Growth")
 
@@ -330,10 +331,10 @@ with tab_detail:
     st.markdown("---")
     # Dataset Limitation
     st.markdown("### Dataset Limitation")
-    st.markdown("""
+    st.markdown(r"""
     **1. Incomplete Year Coverage:** 2016 has only Sep, Oct and Dec (no November) — 3 months. 2018 stops Oct 17. So Yearly GMV comparison is not balanced. We need full 12-month data for fair YoY.
 
-    **2. Cancelled Orders in GMV:** Our Total GMV R$15.8M includes 625 cancelled orders. So total is higher than actual Delivered GMV R$15.4M. It is better to report Delivered GMV for true revenue.
+    **2. Cancelled Orders in GMV:** Our Total GMV R\$15.8M includes 625 cancelled orders. So total is higher than actual Delivered GMV R\$15.4M. It is better to report Delivered GMV for true revenue.
 
     **3. No Customer Demographics:** We don't have age or income data. So we cannot analyze customer lifetime value or retention using payment type and state only.
 
