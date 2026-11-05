@@ -107,6 +107,10 @@ def get_states_list():
     """Get distinct list of customer states for filter dropdown"""
     return pd.read_sql_query("SELECT DISTINCT customer_state FROM customers WHERE customer_state IS NOT NULL ORDER BY customer_state", conn)["customer_state"].tolist()
 
+def get_status_list():
+    """Get distinct list of order_status for filter dropdown"""
+    return pd.read_sql_query("SELECT DISTINCT order_status FROM orders WHERE order_status IS NOT NULL ORDER BY order_status", conn)["order_status"].tolist()
+
 def normalize_state_json(lst):
     """Convert selected states to JSON array. Empty [] means All states."""
     if not lst or "All" in lst:
@@ -161,7 +165,7 @@ def payment_chart(df):
     if df.empty:
         return fig
     total = df["transactions"].sum()
-    labels = [f"{row['payment_type']} ({row['transactions']/total*100:.1f}%)" for _, row in df.iterrows()]
+    labels = [f"{row['payment_type']} ({row['transactions']:,} | {row['transactions']/total*100:.1f}%)" for _, row in df.iterrows()]
     wedges, _ = ax.pie(df["transactions"], colors=COLORS, startangle=90, wedgeprops={'edgecolor':'white','linewidth':1.5})
     ax.legend(wedges, labels, title="Payment Type", loc="center left", bbox_to_anchor=(1,0,0.5,1), frameon=False, fontsize=9)
     ax.set_title("Payment Type Breakdown", loc="left", fontsize=12, weight="bold")
@@ -197,48 +201,72 @@ def instalment_chart(df):
     return fig
 
 # --- QUERIES: All use JOIN customers + state filter guard (?='[]' OR state IN json_each) ---
-def q1_kpis(y,s):
-    """KPI Query: Verified Total GMV R$15,843,553.24 = SUM(price+freight), no status filter"""
-    sql = """WITH m AS (SELECT strftime('%Y-%m', o.order_purchase_timestamp) AS month, SUM(i.price+i.freight_value) AS gmv FROM order_items i JOIN orders o ON i.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) GROUP BY month),
-    p AS (SELECT op.payment_value, op.payment_type FROM order_payments op JOIN orders o ON op.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))))
+def q1_kpis(y,s,st):
+    """KPI Query: Now filters by order_status"""
+    sql = """WITH m AS (SELECT strftime('%Y-%m', o.order_purchase_timestamp) AS month, SUM(i.price+i.freight_value) AS gmv FROM order_items i JOIN orders o ON i.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) AND (?='All' OR o.order_status=?) GROUP BY month),
+    p AS (SELECT op.payment_value, op.payment_type FROM order_payments op JOIN orders o ON op.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) AND (?='All' OR o.order_status=?))
     SELECT ROUND(SUM(gmv),2) AS total_gmv, (SELECT month FROM m ORDER BY gmv DESC LIMIT 1) AS peak_month, (SELECT ROUND(gmv,2) FROM m ORDER BY gmv DESC LIMIT 1) AS peak_month_gmv, (SELECT ROUND(AVG(payment_value),2) FROM p) AS avg_payment_value, (SELECT ROUND(100.0*SUM(CASE WHEN payment_type='credit_card' THEN 1 ELSE 0 END)/COUNT(*),1) FROM p) AS credit_card_pct FROM m"""
-    return run_query(sql, (y,y,s,s, y,y,s,s))
+    return run_query(sql, (y, y, s, s, st, st, y, y, s, s, st, st))
+    # return run_query(sql, (y,y,s,s,st, y,y,s,s,st))
 
-def q2_monthly(y,s):
-    """Monthly Trend: GROUP BY YYYY-MM for Monthly GMV"""
-    return run_query("""SELECT strftime('%Y-%m', o.order_purchase_timestamp) AS month, ROUND(SUM(i.price+i.freight_value),2) AS gmv FROM orders o JOIN order_items i ON o.order_id=i.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) GROUP BY month ORDER BY month""", year_multi(y,s))
+def q2_monthly(y,s,st):
+    return run_query("""SELECT strftime('%Y-%m', o.order_purchase_timestamp) AS month, ROUND(SUM(i.price+i.freight_value),2) AS gmv FROM orders o JOIN order_items i ON o.order_id=i.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) AND (?='All' OR o.order_status=?) GROUP BY month ORDER BY month""", (y,y,s,s,st,st))
 
-def q3_state(y,s):
-    """State Revenue: Top 10 states by GMV, COUNT(DISTINCT order_id) to avoid fan-out"""
-    return run_query("""SELECT c.customer_state AS state, ROUND(SUM(i.price+i.freight_value),2) AS gmv, COUNT(DISTINCT i.order_id) AS orders FROM order_items i JOIN orders o ON i.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) GROUP BY state ORDER BY gmv DESC LIMIT 10""", year_multi(y,s))
+def q3_state(y,s,st):
+    return run_query("""SELECT c.customer_state AS state, ROUND(SUM(i.price+i.freight_value),2) AS gmv, COUNT(DISTINCT i.order_id) AS orders FROM order_items i JOIN orders o ON i.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) AND (?='All' OR o.order_status=?) GROUP BY state ORDER BY gmv DESC LIMIT 10""", (y,y,s,s,st,st))
 
-def q4_payment(y,s):
-    """Payment Type: Must JOIN customers for state filter (bug fix from Claude review)"""
-    return run_query("""SELECT op.payment_type, COUNT(*) AS transactions FROM order_payments op JOIN orders o ON op.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) GROUP BY payment_type ORDER BY transactions DESC""", year_multi(y,s))
+def q4_payment(y,s,st):
+    return run_query("""SELECT op.payment_type, COUNT(*) AS transactions FROM order_payments op JOIN orders o ON op.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) AND (?='All' OR o.order_status=?) GROUP BY payment_type ORDER BY transactions DESC""", (y,y,s,s,st,st))
 
-def q5_yoy(s):
-    """YoY: Yearly GMV, note 2016 Sep,Oct,Dec only, 2018 ends Oct 17"""
-    return run_query("""SELECT strftime('%Y', o.order_purchase_timestamp) AS year, ROUND(SUM(i.price+i.freight_value),2) AS gmv, COUNT(DISTINCT o.order_id) AS orders FROM order_items i JOIN orders o ON i.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) GROUP BY year ORDER BY year""", multi_params(s))
+def q5_yoy(s,st):
+    return run_query("""SELECT strftime('%Y', o.order_purchase_timestamp) AS year, ROUND(SUM(i.price+i.freight_value),2) AS gmv, COUNT(DISTINCT o.order_id) AS orders FROM order_items i JOIN orders o ON i.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) AND (?='All' OR o.order_status=?) GROUP BY year ORDER BY year""", (s,s,st,st))
 
-def q6_instalments(y,s):
-    """Instalments: CAST to INT for 0-24 sorting, only credit_card payment_type"""
-    return run_query("""SELECT CAST(op.payment_installments AS INTEGER) AS instalments, COUNT(*) AS transactions FROM order_payments op JOIN orders o ON op.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE op.payment_type='credit_card' AND (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) GROUP BY instalments ORDER BY instalments""", year_multi(y,s))
+def q6_instalments(y,s,st):
+    return run_query("""SELECT CAST(op.payment_installments AS INTEGER) AS instalments, COUNT(*) AS transactions, AVG(op.payment_value) AS avg_payment_value FROM order_payments op JOIN orders o ON op.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE op.payment_type='credit_card' AND (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) AND (?='All' OR o.order_status=?) GROUP BY instalments ORDER BY instalments""", (y,y,s,s,st,st))
+
+# def q1_kpis(y,s):
+#     """KPI Query: Verified Total GMV R$15,843,553.24 = SUM(price+freight), no status filter"""
+#     sql = """WITH m AS (SELECT strftime('%Y-%m', o.order_purchase_timestamp) AS month, SUM(i.price+i.freight_value) AS gmv FROM order_items i JOIN orders o ON i.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) GROUP BY month),
+#     p AS (SELECT op.payment_value, op.payment_type FROM order_payments op JOIN orders o ON op.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))))
+#     SELECT ROUND(SUM(gmv),2) AS total_gmv, (SELECT month FROM m ORDER BY gmv DESC LIMIT 1) AS peak_month, (SELECT ROUND(gmv,2) FROM m ORDER BY gmv DESC LIMIT 1) AS peak_month_gmv, (SELECT ROUND(AVG(payment_value),2) FROM p) AS avg_payment_value, (SELECT ROUND(100.0*SUM(CASE WHEN payment_type='credit_card' THEN 1 ELSE 0 END)/COUNT(*),1) FROM p) AS credit_card_pct FROM m"""
+#     return run_query(sql, (y,y,s,s, y,y,s,s))
+
+# def q2_monthly(y,s):
+#     """Monthly Trend: GROUP BY YYYY-MM for Monthly GMV"""
+#     return run_query("""SELECT strftime('%Y-%m', o.order_purchase_timestamp) AS month, ROUND(SUM(i.price+i.freight_value),2) AS gmv FROM orders o JOIN order_items i ON o.order_id=i.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) GROUP BY month ORDER BY month""", year_multi(y,s))
+
+# def q3_state(y,s):
+#     """State Revenue: Top 10 states by GMV, COUNT(DISTINCT order_id) to avoid fan-out"""
+#     return run_query("""SELECT c.customer_state AS state, ROUND(SUM(i.price+i.freight_value),2) AS gmv, COUNT(DISTINCT i.order_id) AS orders FROM order_items i JOIN orders o ON i.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) GROUP BY state ORDER BY gmv DESC LIMIT 10""", year_multi(y,s))
+
+# def q4_payment(y,s):
+#     """Payment Type: Must JOIN customers for state filter (bug fix from Claude review)"""
+#     return run_query("""SELECT op.payment_type, COUNT(*) AS transactions FROM order_payments op JOIN orders o ON op.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) GROUP BY payment_type ORDER BY transactions DESC""", year_multi(y,s))
+
+# def q5_yoy(s):
+#     """YoY: Yearly GMV, note 2016 Sep,Oct,Dec only, 2018 ends Oct 17"""
+#     return run_query("""SELECT strftime('%Y', o.order_purchase_timestamp) AS year, ROUND(SUM(i.price+i.freight_value),2) AS gmv, COUNT(DISTINCT o.order_id) AS orders FROM order_items i JOIN orders o ON i.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) GROUP BY year ORDER BY year""", multi_params(s))
+
+# def q6_instalments(y,s):
+#     """Instalments: CAST to INT for 0-24 sorting, only credit_card payment_type"""
+#     return run_query("""SELECT CAST(op.payment_installments AS INTEGER) AS instalments, COUNT(*) AS transactions, AVG(op.payment_value) AS avg_payment_value FROM order_payments op JOIN orders o ON op.order_id=o.order_id JOIN customers c ON o.customer_id=c.customer_id WHERE op.payment_type='credit_card' AND (?='All' OR strftime('%Y', o.order_purchase_timestamp)=?) AND (?='[]' OR c.customer_state IN (SELECT value FROM json_each(?))) GROUP BY instalments ORDER BY instalments""", year_multi(y,s))
 
 # ---- MAIN DASHBOARD ----
 st.title("📈 Revenue & Growth Dashboard")
 st.markdown("**Group 4 Capstone Project | Brazilian Olist E-commerce**")
 
 # --- Sidebar ---
-st.sidebar.title("🎛️ Filters")
-st.sidebar.markdown("Filter all charts by Year and by State")
+st.sidebar.title("🎛 Filters")
+st.sidebar.markdown("Filter all charts by Year, State and Status")
 st.sidebar.markdown("---")
 states_list = get_states_list()
+status_list = get_status_list()  # <-- NEW
 selected_year = st.sidebar.selectbox("📅 Filter by Year", ["All","2016","2017","2018"])
-selected_state_raw = st.sidebar.multiselect("🗺️ Filter by Customer State", ["All"] + states_list, default=["All"])
+selected_state_raw = st.sidebar.multiselect("🗺 Filter by Customer State", ["All"] + states_list, default=["All"])
+selected_status = st.sidebar.selectbox("📦 Filter by Order Status", ["All"] + status_list)  # <-- NEW
 state_json = normalize_state_json(selected_state_raw)
 st.sidebar.markdown("---")
-st.sidebar.caption(f"Filtering: {selected_year} | {', '.join(selected_state_raw) if len(selected_state_raw) <=3 else f'{len(selected_state_raw)} states'}")
-
+st.sidebar.caption(f"Filtering: {selected_year} | Status={selected_status} | {', '.join(selected_state_raw) if len(selected_state_raw) <=3 else f'{len(selected_state_raw)} states'}")
 # --- Tabs: Overview / Revenue & Growth / Detail & Method ---
 tab_overview, tab_theme, tab_detail = st.tabs(["Overview", "Revenue & Growth", "Detail & Method"])
 
@@ -250,12 +278,12 @@ with tab_overview:
     </div>
     """, unsafe_allow_html=True)
     
-    kpi_df = q1_kpis(selected_year, state_json)
+    kpi_df = q1_kpis(selected_year, state_json, selected_status)
     if kpi_df.empty or pd.isna(kpi_df.iloc[0]["total_gmv"]):
         st.info("No data for this filter selection")
     else:
         k = kpi_df.iloc[0]
-        df2 = q2_monthly(selected_year, state_json)
+        df2 = q2_monthly(selected_year, state_json, selected_status)
         if not df2.empty:
             # Insight from graph, SP 37.38% of GMV
             headline = f"""Our Monthly GMV Trend shows low sales in late 2016, steady growth through 2017, and a sharp peak in <b>{k['peak_month']} at {fmt_smart(k['peak_month_gmv'])}</b> during Black Friday. 
@@ -301,15 +329,15 @@ with tab_theme:
     
     colA, colB = st.columns(2)
     with colA: 
-        df3 = q3_state(selected_year, state_json)
+        df3 = q3_state(selected_year, state_json, selected_status)
         st.pyplot(state_chart(df3))
     with colB:
-        df4 = q4_payment(selected_year, state_json)
+        df4 = q4_payment(selected_year, state_json, selected_status)
         st.pyplot(payment_chart(df4))
-        st.dataframe(df4, use_container_width=True)
+        # st.dataframe(df4, use_container_width=True)
     with st.expander("Year-over-Year GMV"):
-        df5 = q5_yoy(state_json)
-        st.dataframe(df5, use_container_width=True)
+        df5 = q5_yoy(state_json, selected_status)
+        # st.dataframe(df5, use_container_width=True)
         st.pyplot(yoy_chart(df5))
 
 with tab_detail:
@@ -322,9 +350,11 @@ with tab_detail:
     </div>
     """, unsafe_allow_html=True)
     
-    df6 = q6_instalments(selected_year, state_json)
-    st.dataframe(df6, use_container_width=True)
+    df6 = q6_instalments(selected_year, state_json, selected_status)
     st.pyplot(instalment_chart(df6))
+    toggle = st.toggle(label="Show Instalment Chart Data", value=False)
+    if toggle:
+        st.dataframe(df6, use_container_width=True)
     
     st.markdown("---")
     # Dataset Limitation
