@@ -71,19 +71,17 @@ sns.set_style("whitegrid")
 plt.rcParams.update({'font.size': 10, 'axes.titlesize': 11}) # Small readable fonts for charts
 
 # --- DB Connection: Use in-memory SQLite to avoid empty olist.db file issue ---
+
 @st.cache_resource
 def get_conn():
-    """Create in-memory DB and load 4 needed tables from your local path"""
     conn = sqlite3.connect(":memory:", check_same_thread=False)
-    # Your exact local path as requested
-    base = r"C:\Gee's Lenovo\Revenue & Growth\Revenue & Growth"
+    # For Streamlit Cloud - use relative path, not C:\...
     files = {
-        "orders": f"{base}\\olist_orders_dataset.csv",
-        "order_items": f"{base}\\olist_order_items_dataset.csv",
-        "order_payments": f"{base}\\olist_order_payments_dataset.csv",
-        "customers": f"{base}\\olist_customers_dataset.csv"
+        "orders": "olist_orders_dataset.csv",
+        "order_items": "olist_order_items_dataset.csv",
+        "order_payments": "olist_order_payments_dataset.csv",
+        "customers": "olist_customers_dataset.csv"
     }
-    # Load each CSV into SQLite table
     for table, path in files.items():
         pd.read_csv(path).to_sql(table, conn, if_exists="replace", index=False)
     return conn
